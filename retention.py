@@ -27,6 +27,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import StepLR
 
 
@@ -53,7 +54,7 @@ def featurize(df):
     # df['f_lang'] = df.apply(lambda x: '%s->%s' % (x['ui_language'], x['learning_language']), axis=1)
     df['f_history_correct_sqrt'] = df.history_correct.apply(lambda x: math.sqrt(1 + x))
     df['f_history_wrong_sqrt'] = df.apply(lambda x: math.sqrt(1 + x['history_seen'] - x['history_correct']), axis=1)
-    # df = df.rename({'delta': 'f_delta'}, axis=1)
+    df['f_delta'] = df.delta
     df = df.rename({'history_seen': 'f_history_seen'}, axis=1)
     df = df.rename({'history_correct': 'f_history_correct'}, axis=1)
     # df = df.rename({'session_seen': 'f_session_seen'}, axis=1)
@@ -102,8 +103,10 @@ def get_split_numpy():
     dirs = [
         'data/x_train.npy',
         'data/y_train.npy',
+        'data/h_train.npy',
         'data/x_test.npy',
-        'data/y_test.npy'
+        'data/y_test.npy',
+        'data/h_test.npy'
     ]
     if all(os.path.exists(d) for d in dirs):
         print('loading train test numpy')
@@ -115,30 +118,34 @@ def get_split_numpy():
     print('features', feature_names)
     x_train = train_df[feature_names].to_numpy().astype(np.float32)
     y_train = train_df['p_recall'].to_numpy().astype(np.float32)
+    h_train = train_df['half_life'].to_numpy().astype(np.float32)
     x_test = test_df[feature_names].to_numpy().astype(np.float32)
     y_test = test_df['p_recall'].to_numpy().astype(np.float32)
+    h_test = test_df['half_life'].to_numpy().astype(np.float32)
 
     np.save(dirs[0], x_train)
     np.save(dirs[1], y_train)
-    np.save(dirs[2], x_test)
-    np.save(dirs[3], y_test)
+    np.save(dirs[2], h_train)
+    np.save(dirs[3], x_test)
+    np.save(dirs[4], y_test)
+    np.save(dirs[5], h_test)
 
-    return x_train, y_train, x_test, y_test
+    return x_train, y_train, h_train, x_test, y_test, h_test
 
 
 class RetentionDataset(torch.utils.data.Dataset):
 
     def __init__(self, fold='train'):
-        x_train, y_train, x_test, y_test = get_split_numpy()
+        x_train, y_train, h_train, x_test, y_test, h_test = get_split_numpy()
         self.mean = np.mean(x_train, axis=0)
         self.std = np.std(x_train, axis=0)
         self.mean[-1] = 0
         self.std[-1] = 1
 
         if fold == 'train':
-            self.x, self.y = x_train, y_train
+            self.x, self.y, self.h = x_train, y_train, h_train
         elif fold == 'test':
-            self.x, self.y = x_test, y_test
+            self.x, self.y, self.h = x_test, y_test, h_test
 
     def __len__(self):
         return len(self.y)
@@ -148,32 +155,40 @@ class RetentionDataset(torch.utils.data.Dataset):
             idx = idx.tolist()
         x = (self.x[idx] - self.mean) / self.std
         y = np.array(self.y[idx])
-        return torch.from_numpy(x), torch.from_numpy(y)
+        h = np.array(self.h[idx])
+        return torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(h)
 
 
 class Net(nn.Module):
 
     def __init__(self, n_input, n_output):
         super(Net, self).__init__()
-        # self.fc1 = nn.Linear(n_input, 128)
-        # self.dropout1 = nn.Dropout(0.25)
-        # self.fc2 = nn.Linear(128, 2)
-        self.fc1 = nn.Linear(n_input, n_output)
+        # self.fc1 = nn.Linear(n_input, n_output)
+        self.fc1 = nn.Linear(n_input, 20)
+        self.dropout1 = nn.Dropout(0.25)
+        self.fc2 = nn.Linear(20, 20)
+        self.dropout2 = nn.Dropout(0.25)
+        self.fc3 = nn.Linear(20, 20)
+        self.dropout3 = nn.Dropout(0.25)
+        self.fc4 = nn.Linear(20, n_output)
 
     def forward(self, x):
-        # x = self.fc1(x)
-        # x = F.relu(x)
-        # x = self.dropout1(x)
-        # x = self.fc2(x)
-        # return x
-        return self.fc1(x)
-
+        # return self.fc1(x)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout1(x)
+        x = self.fc2(x)
+        x = self.dropout2(x)
+        x = self.fc3(x)
+        x = self.dropout3(x)
+        x = self.fc4(x)
+        return x
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     loss_func = nn.MSELoss()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
+    for batch_idx, (data, target, half_life) in enumerate(train_loader):
+        data, target, half_life = data.to(device), target.to(device), half_life.to(device)
         optimizer.zero_grad()
         logits = model(data)
         loss = loss_func(logits[:, 0], target)
@@ -191,8 +206,8 @@ def test(args, model, device, test_loader):
     loss_func = nn.MSELoss(reduction='mean')
     predictions = []
     with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
+        for data, target, half_life in test_loader:
+            data, target, half_life = data.to(device), target.to(device), half_life.to(device)
             logits = model(data)[:, 0]
             # sum up batch loss
             test_loss += loss_func(logits, target).item()
