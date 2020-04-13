@@ -16,7 +16,7 @@
 # Assume that half-life increases exponentially with each repeated exposure, with a linear approximator, you get $f_\theta(x,\Delta)=2^{\theta\cdot x}$. Use this parameterization with regression against both recall probability and back-solved half-life, you get Settles' formulation:
 # $$l(<\cdot>; \theta)=(p-2^{\frac{\Delta}{2^{\theta\cdot x}}})^2+\alpha(\frac{\Delta}{\log_2(p)}-2^{\theta\cdot{x}})^2+\lambda|\theta|_2^2$$
 
-# In[68]:
+# In[1]:
 
 
 import os
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 
 
-# In[69]:
+# In[2]:
 
 
 MIN_HALF_LIFE = 15.0 / (24 * 60)    # 15 minutes
@@ -63,7 +63,7 @@ def featurize(df):
     return df
 
 def get_featurized_df():
-    featurized_df_dir = 'data/protobowl/protobowl-042818.log.features.h5'
+    featurized_df_dir = 'data/features.h5'
 
     if os.path.exists(featurized_df_dir):
         print('loading featurized_df')
@@ -71,11 +71,14 @@ def get_featurized_df():
     
     df = pd.read_csv('./data/settles.acl16.learning_traces.13m.csv.gz')
     df = featurize(df)
+    
+    df.to_hdf(featurized_df_dir, 'data')
+    
     return df
 
 def get_split_dfs():
-    train_df_dir = 'data/protobowl/protobowl-042818.log.train.h5'
-    test_df_dir = 'data/protobowl/protobowl-042818.log.test.h5'
+    train_df_dir = 'data/train.h5'
+    test_df_dir = 'data/test.h5'
 
     if os.path.exists(train_df_dir) and os.path.exists(test_df_dir):
         print('loading train test df')
@@ -85,6 +88,10 @@ def get_split_dfs():
     
     splitpoint = int(0.9 * len(df))
     train_df, test_df = df.iloc[:splitpoint], df.iloc[splitpoint:]
+    
+    train_df.to_hdf(train_df_dir, 'data')
+    test_df.to_hdf(test_df_dir, 'data')
+
     return train_df, test_df
 
 def get_split_numpy():
@@ -106,10 +113,16 @@ def get_split_numpy():
     y_train = train_df['p_recall'].to_numpy().astype(np.float32)
     x_test = test_df[feature_names].to_numpy().astype(np.float32)
     y_test = test_df['p_recall'].to_numpy().astype(np.float32)
+    
+    np.save(dirs[0], x_train)
+    np.save(dirs[1], y_train)
+    np.save(dirs[2], x_test)
+    np.save(dirs[3], y_test)
+    
     return x_train, y_train, x_test, y_test
 
 
-# In[70]:
+# In[3]:
 
 
 class RetentionDataset(torch.utils.data.Dataset):
@@ -137,7 +150,13 @@ class RetentionDataset(torch.utils.data.Dataset):
         return torch.from_numpy(x), torch.from_numpy(y)
 
 
-# In[ ]:
+# In[5]:
+
+
+train_dataset = RetentionDataset('train')
+
+
+# In[4]:
 
 
 class Net(nn.Module):
@@ -252,4 +271,10 @@ def main():
             torch.save(model.state_dict(), checkpoint_dir)
             print('save model checkpoint to', checkpoint_dir)
             best_test_loss = test_loss
+
+
+# In[ ]:
+
+
+
 
